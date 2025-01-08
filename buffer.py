@@ -1,7 +1,6 @@
 import pyaudio
 import numpy as np
 import matplotlib.pyplot as plt
-import time
 import threading
 import whisper
 
@@ -14,6 +13,7 @@ CHANNELS = 1  # Mono audio
 RATE = 44100  # 44.1 kHz sample rate
 CHUNK = 1024  # Number of samples per frame
 BUFFER_DURATION = 10  # Ring buffer duration in seconds
+WHISPER_RATE = 16000  # Whisper's sample rate
 
 # Calculate the buffer size in chunks
 BUFFER_SIZE = int(RATE / CHUNK * BUFFER_DURATION)
@@ -39,6 +39,8 @@ class AudioManager:
             frames_per_buffer=CHUNK,
         )
 
+        self.model = whisper.load_model("base")
+
     def read_audio(self):
         try:
             while self.active:
@@ -63,22 +65,69 @@ class AudioManager:
 
     def visualize_audio(self):
         plt.ion()
-        fig, ax = plt.subplots()
+
+        fig, axs = plt.subplots(2, 1, figsize=(14, 8))
+        ax1, ax2 = axs
+
+        last_msg = None
+
         try:
             while self.active:
                 with self.buffer_lock:
                     if not self.ring_buffer:
                         continue
-                    audio_data = np.concatenate(self.ring_buffer)
-                time_data = np.linspace(0, len(audio_data) / RATE, num=len(audio_data))
+                    raw_audio_data = np.concatenate(self.ring_buffer)
 
-                ax.clear()
-                ax.set_title("Audio Data")
-                ax.set_xlabel("Time (s)")
-                ax.set_ylabel("Amplitude")
-                ax.set_xlim([0, BUFFER_DURATION])
-                ax.plot(time_data, audio_data)
-                plt.pause(0.1)
+                try:
+                    # Resample audio to Whisper's expected rate (16 kHz)
+                    audio_data = np.interp(
+                        np.linspace(
+                            0,
+                            len(raw_audio_data),
+                            num=int(len(raw_audio_data) * WHISPER_RATE / RATE),
+                        ),
+                        np.arange(len(raw_audio_data)),
+                        raw_audio_data,
+                    ).astype("float32")
+
+                    # Create time axis for waveform
+                    time_data = np.linspace(
+                        0, len(audio_data) / WHISPER_RATE, num=len(audio_data)
+                    )
+
+                    audio = whisper.pad_or_trim(audio_data)
+                    mel = whisper.log_mel_spectrogram(audio).to(self.model.device)
+                    mel_numpy = mel.cpu().numpy()
+                    has_spectrogram = True
+                except Exception as e:
+                    if str(e) != last_msg:
+                        print(e)
+                    last_msg = str(e)
+                    has_spectrogram = False
+
+                # Plot waveform
+                ax1.clear()
+                ax1.plot(time_data, audio_data)
+                ax1.set_title("Audio Data")
+                ax1.set_xlabel("Time (s)")
+                ax1.set_ylabel("Amplitude")
+                ax1.set_xlim([0, BUFFER_DURATION])
+
+                # Plot spectrogram
+                ax2.clear()
+                if has_spectrogram:
+                    ax2.imshow(
+                        mel_numpy,
+                        aspect="auto",
+                        origin="lower",
+                        interpolation="nearest",
+                    )
+                ax2.set_title("Spectrogram")
+                ax2.set_xlabel("Time (s)")
+                ax2.set_xlim([0, 100 * BUFFER_DURATION])
+
+                plt.tight_layout()
+                plt.pause(0.05)
 
                 if not plt.fignum_exists(fig.number):
                     self.active = False
